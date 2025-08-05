@@ -1,0 +1,43 @@
+*{
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+
+
+
+.logo{
+    width: 6%;
+    height: 6%;
+}
+
+.card-img-top{
+    width: 100%;
+    height: 200px;
+    object-fit: contain;
+}
+/* .admin_image{
+    width: 100px;
+    object-fit: contain;
+} */
+
+.blue{
+    color:blue;
+}
+.white{
+    color: white;
+}
+.green{
+    color: rgb(13, 248, 13);
+}
+
+.bg-blue{
+    background-color:blue;
+}
+.bg-white{
+    background-color: white;
+}
+.bg-green{
+    background-color: rgb(10, 248, 10);
+}
