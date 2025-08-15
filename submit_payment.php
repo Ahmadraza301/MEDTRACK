@@ -1,102 +1,184 @@
 <?php
-header('Access-Control-Allow-Origin:*');
-header('Access-Control-Allow-Methods:POST,GET,PUT,PATCH,DELETE');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST, GET, PUT, PATCH, DELETE');
 header("Content-Type: application/json");
 header("Accept: application/json");
-header('Access-Control-Allow-Headers:Access-Control-Allow-Origin,Access-Control-Allow-Methods,Content-Type');
+header('Access-Control-Allow-Headers: Access-Control-Allow-Origin, Access-Control-Allow-Methods, Content-Type');
 
 // Include database connection
 include('./components/connect.php');
 
-if (isset($_POST['action']) && $_POST['action'] == 'payOrder') { // Fixed single `=` to `==`
+// Get JSON input
+$input = json_decode(file_get_contents('php://input'), true);
 
-    $razorpay_mode = 'test';
-
-    $razorpay_test_key = 'rzp_test_pi2fEEfhC66GKs'; // Your Test Key
-    $razorpay_test_secret_key = 'jzWG8EKZkK9JEQMqjlCaWG7W'; // Your Test Secret Key
-
-    if ($razorpay_mode == 'test') {
-        $razorpay_key = $razorpay_test_key;
-        $authAPIkey = "Basic " . base64_encode($razorpay_test_key . ":" . $razorpay_test_secret_key);
-    } else {
-        $authAPIkey = "Basic " . base64_encode($razorpay_live_key . ":" . $razorpay_live_secret_key);
-        $razorpay_key = $razorpay_live_key;
+if (isset($input['action']) && $input['action'] == 'payOrder') {
+    
+    // Validate required fields
+    $required_fields = ['billing_name', 'billing_mobile', 'billing_email', 'payAmount', 'product_id'];
+    foreach ($required_fields as $field) {
+        if (!isset($input[$field]) || empty($input[$field])) {
+            echo json_encode(['res' => 'error', 'info' => "Missing required field: $field"]);
+            exit;
+        }
     }
-
-    // Set transaction details
-    $order_id = uniqid(); // Generate a unique order ID
-    $billing_name = $_POST['billing_name'];
-    $billing_mobile = $_POST['billing_mobile'];
-    $billing_email = $_POST['billing_email'];
-    $shipping_name = $_POST['shipping_name'];
-    $shipping_mobile = $_POST['shipping_mobile'];
-    $shipping_email = $_POST['shipping_email'];
-    $paymentOption = $_POST['paymentOption'];
-    $payAmount = $_POST['payAmount'];
-
-    $note = "Payment of amount Rs. " . $payAmount;
-
+    
+    // Sanitize and validate input
+    $billing_name = trim($input['billing_name']);
+    $billing_mobile = trim($input['billing_mobile']);
+    $billing_email = trim($input['billing_email']);
+    $shipping_name = trim($input['shipping_name'] ?? $billing_name);
+    $shipping_mobile = trim($input['shipping_mobile'] ?? $billing_mobile);
+    $shipping_email = trim($input['shipping_email'] ?? $billing_email);
+    $quantity = (int)($input['quantity'] ?? 1);
+    $paymentOption = trim($input['paymentOption'] ?? 'netbanking');
+    $payAmount = (float)$input['payAmount'];
+    $product_id = (int)$input['product_id'];
+    
+    // Validate email
+    if (!filter_var($billing_email, FILTER_VALIDATE_EMAIL)) {
+        echo json_encode(['res' => 'error', 'info' => 'Invalid email address']);
+        exit;
+    }
+    
+    // Validate mobile number
+    if (!preg_match('/^[0-9]{10}$/', $billing_mobile)) {
+        echo json_encode(['res' => 'error', 'info' => 'Invalid mobile number']);
+        exit;
+    }
+    
+    // Validate amount
+    if ($payAmount <= 0) {
+        echo json_encode(['res' => 'error', 'info' => 'Invalid amount']);
+        exit;
+    }
+    
+    // Validate product exists and has sufficient stock
+    $product_query = "SELECT p.*, s.shop_name FROM products p 
+                      INNER JOIN shopkeeper_accounts s ON p.shop_id = s.id 
+                      WHERE p.id = ? AND p.is_active = 1";
+    $stmt = $conn->prepare($product_query);
+    $stmt->bind_param("i", $product_id);
+    $stmt->execute();
+    $product_result = $stmt->get_result();
+    
+    if ($product_result->num_rows === 0) {
+        echo json_encode(['res' => 'error', 'info' => 'Product not found']);
+        exit;
+    }
+    
+    $product = $product_result->fetch_assoc();
+    
+    if ($product['stock_quantity'] < $quantity) {
+        echo json_encode(['res' => 'error', 'info' => 'Insufficient stock']);
+        exit;
+    }
+    
+    $stmt->close();
+    
+    // Razorpay configuration (use environment variables in production)
+    $razorpay_mode = 'test'; // Change to 'live' for production
+    
+    if ($razorpay_mode == 'test') {
+        $razorpay_key = 'rzp_test_pi2fEEfhC66GKs'; // Your Test Key
+        $razorpay_secret_key = 'jzWG8EKZkK9JEQMqjlCaWG7W'; // Your Test Secret Key
+    } else {
+        $razorpay_key = getenv('RAZORPAY_LIVE_KEY'); // Use environment variables
+        $razorpay_secret_key = getenv('RAZORPAY_LIVE_SECRET');
+    }
+    
+    // Generate unique order ID
+    $order_id = 'MT' . date('YmdHis') . rand(1000, 9999);
+    
     // Prepare Razorpay order request
     $postdata = array(
-        "amount" => $payAmount * 100,
+        "amount" => (int)($payAmount * 100), // Convert to paise
         "currency" => "INR",
         "receipt" => $order_id,
         "notes" => array(
-            "notes_key_1" => $note,
-            "notes_key_2" => ""
+            "product_id" => $product_id,
+            "quantity" => $quantity,
+            "shop_name" => $product['shop_name']
         )
     );
-
+    
+    // Create Razorpay order
     $curl = curl_init();
     curl_setopt_array($curl, array(
         CURLOPT_URL => 'https://api.razorpay.com/v1/orders',
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_ENCODING => '',
         CURLOPT_MAXREDIRS => 10,
-        CURLOPT_TIMEOUT => 0,
+        CURLOPT_TIMEOUT => 30,
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
         CURLOPT_CUSTOMREQUEST => 'POST',
         CURLOPT_POSTFIELDS => json_encode($postdata),
         CURLOPT_HTTPHEADER => array(
             'Content-Type: application/json',
-            'Authorization: ' . $authAPIkey
+            'Authorization: Basic ' . base64_encode($razorpay_key . ":" . $razorpay_secret_key)
         ),
     ));
-
+    
     $response = curl_exec($curl);
+    $http_code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
     curl_close($curl);
-    $orderRes = json_decode($response);
-
-    if (isset($orderRes->id)) {
-        $rpay_order_id = $orderRes->id;
-
-        $item_id = 
-        // Insert payment details into the database
-        $sql = "INSERT INTO payments (payment_id, payer_id, payer_name, payer_email, amount, created_at, status) 
-                VALUES ('$order_id', '$billing_mobile', '$billing_name', '$billing_email', '$payAmount', NOW(), 'pending')";
-
-        if (mysqli_query($conn, $sql)) {
-            $dataArr = array(
-                'amount' => $payAmount,
-                'description' => "Pay bill of Rs. " . $payAmount,
-                'rpay_order_id' => $rpay_order_id,
-                'name' => $billing_name,
-                'email' => $billing_email,
-                'mobile' => $billing_mobile
-            );
-            echo json_encode(['res' => 'success', 'order_number' => $order_id, 'userData' => $dataArr, 'razorpay_key' => $razorpay_key]);
-            exit;
-        } else {
-            echo json_encode(['res' => 'error', 'info' => 'Database error: ' . mysqli_error($conn)]);
-            exit;
-        }
-    } else {
-        echo json_encode(['res' => 'error', 'order_id' => $order_id, 'info' => 'Error with payment']);
+    
+    if ($http_code !== 200) {
+        echo json_encode(['res' => 'error', 'info' => 'Failed to create Razorpay order']);
         exit;
     }
+    
+    $orderRes = json_decode($response);
+    
+    if (!isset($orderRes->id)) {
+        echo json_encode(['res' => 'error', 'info' => 'Invalid response from Razorpay']);
+        exit;
+    }
+    
+    $rpay_order_id = $orderRes->id;
+    
+    // Insert order into database
+    $insert_order = "INSERT INTO orders (order_number, customer_name, customer_email, customer_phone, 
+                                        product_id, quantity, total_amount, payment_status, 
+                                        razorpay_order_id, created_at) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW())";
+    
+    $stmt = $conn->prepare($insert_order);
+    $stmt->bind_param("sssiiids", $order_id, $billing_name, $billing_email, $billing_mobile, 
+                      $product_id, $quantity, $payAmount, $rpay_order_id);
+    
+    if ($stmt->execute()) {
+        // Update product stock
+        $update_stock = "UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?";
+        $stock_stmt = $conn->prepare($update_stock);
+        $stock_stmt->bind_param("ii", $quantity, $product_id);
+        $stock_stmt->execute();
+        $stock_stmt->close();
+        
+        // Prepare response data
+        $dataArr = array(
+            'amount' => $payAmount,
+            'description' => "Purchase of " . $product['name'] . " (Qty: $quantity) - ₹" . number_format($payAmount, 2),
+            'rpay_order_id' => $rpay_order_id,
+            'name' => $billing_name,
+            'email' => $billing_email,
+            'mobile' => $billing_mobile
+        );
+        
+        echo json_encode([
+            'res' => 'success', 
+            'order_number' => $order_id, 
+            'userData' => $dataArr, 
+            'razorpay_key' => $razorpay_key
+        ]);
+        
+        $stmt->close();
+    } else {
+        echo json_encode(['res' => 'error', 'info' => 'Database error: ' . $stmt->error]);
+        $stmt->close();
+    }
+    
 } else {
-    echo json_encode(['res' => 'error']);
-    exit;
+    echo json_encode(['res' => 'error', 'info' => 'Invalid request']);
 }
 ?>
